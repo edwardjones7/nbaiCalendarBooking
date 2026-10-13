@@ -1,9 +1,15 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
+import { Redis } from "@upstash/redis";
 
-// Bookings live in a local JSON file. Fine for one running server.
-// To deploy on serverless (Vercel), swap these functions for a real DB (e.g. Upstash Redis / Neon).
-const FILE = path.join(process.cwd(), "data", "bookings.json");
+// Bookings live in Upstash Redis (connected via Vercel Storage), one hash: id -> Booking.
+// Needs KV_REST_API_URL and KV_REST_API_TOKEN.
+const KEY = "bookings";
+const LOCK = "bookings:lock";
+
+let client: Redis | null = null;
+function redis() {
+  if (!client) client = Redis.fromEnv();
+  return client;
+}
 
 export type Booking = {
   id: string;
@@ -23,27 +29,32 @@ export type Booking = {
 };
 
 async function readAll(): Promise<Booking[]> {
-  try {
-    return JSON.parse(await fs.readFile(FILE, "utf8"));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw e;
+  // The client parses the JSON values for us.
+  return ((await redis().hvals(KEY)) ?? []) as Booking[];
+}
+
+async function save(b: Booking) {
+  await redis().hset(KEY, { [b.id]: b });
+}
+
+// Serialize writes across all server instances so two setters booking at once can't double-book.
+async function locked<T>(fn: () => Promise<T>): Promise<T> {
+  const token = crypto.randomUUID();
+  const deadline = Date.now() + 10_000;
+  while (!(await redis().set(LOCK, token, { nx: true, px: 10_000 }))) {
+    if (Date.now() > deadline) throw new Error("Bookings are busy, try again.");
+    await new Promise((r) => setTimeout(r, 100));
   }
-}
-
-async function writeAll(bookings: Booking[]) {
-  await fs.mkdir(path.dirname(FILE), { recursive: true });
-  const tmp = `${FILE}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(bookings, null, 2));
-  await fs.rename(tmp, FILE);
-}
-
-// Serialize writes so two setters booking at once can't clobber each other.
-let queue: Promise<unknown> = Promise.resolve();
-function locked<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(fn, fn);
-  queue = run.catch(() => {});
-  return run;
+  try {
+    return await fn();
+  } finally {
+    // Only release the lock if it's still ours.
+    await redis().eval(
+      'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0',
+      [LOCK],
+      [token],
+    );
+  }
 }
 
 export async function listBookings(fromMs: number, toMs: number): Promise<Booking[]> {
@@ -57,19 +68,17 @@ export function addBooking(b: Booking, isFree: (existing: Booking[]) => boolean)
   return locked(async () => {
     const all = await readAll();
     if (!isFree(all.filter((x) => x.status === "booked"))) return false;
-    all.push(b);
-    await writeAll(all);
+    await save(b);
     return true;
   });
 }
 
 export function cancelBooking(id: string): Promise<Booking | null> {
   return locked(async () => {
-    const all = await readAll();
-    const b = all.find((x) => x.id === id && x.status === "booked");
-    if (!b) return null;
+    const b = await redis().hget<Booking>(KEY, id);
+    if (!b || b.status !== "booked") return null;
     b.status = "cancelled";
-    await writeAll(all);
+    await save(b);
     return b;
   });
 }

@@ -10,6 +10,7 @@
     "google-auth": "node scripts/google-auth.mjs"
   },
   "dependencies": {
+    "@upstash/redis": "^1.39.0",
     "luxon": "^3.7.2",
     "next": "16.4.0",
     "react": "19.3.0",

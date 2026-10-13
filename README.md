@@ -36,8 +36,7 @@ Bookings still work without this step; they just won't get a Meet link.
 The Meet rooms belong to the account you signed in with. They are created as open rooms, so anyone with the link joins directly without the host admitting them.
 
 ## Where bookings are stored
-Bookings are saved in `data/bookings.json`. That works anywhere the app runs as one persistent server: your machine, a VPS, Railway or Render with a disk.
-**It won't persist on Vercel**, because serverless file systems are wiped. Before deploying there, swap `src/lib/store.ts` for a database such as Upstash Redis or Neon. Only that one file needs to change.
+Bookings are saved in Upstash Redis, connected to the Vercel project under **Storage** (database `upstash-kv-amber-lens`, free plan). Vercel sets `KV_REST_API_URL` and `KV_REST_API_TOKEN` automatically; for local dev, copy them into `.env.local` (Storage → the database → Show secret). Local dev and the live site share the same bookings.
 
 ## Customizing
 - Meeting length, hours, days and booking window: `src/lib/config.ts`
